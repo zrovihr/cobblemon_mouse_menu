@@ -3,7 +3,7 @@ plugins {
 	id 'maven-publish'
 }
 
-version = project.mod_version
+version = "${project.mod_version}+cobblemon${project.cobblemon_version}+mc${project.minecraft_version}"
 group = project.maven_group
 
 base {
@@ -19,7 +19,7 @@ loom {
 	splitEnvironmentSourceSets()
 
 	mods {
-		"cobblemon-interaction" {
+		"cobblemon-shortcuts" {
 			sourceSet sourceSets.main
 			sourceSet sourceSets.client
 		}
@@ -33,7 +33,7 @@ dependencies {
 	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
 
 	// Cobblemon - compile only, can't run in dev due to Kotlin metadata remapping bug
-	modCompileOnly "com.cobblemon:fabric:1.7.3+1.21.1"
+	modCompileOnly "com.cobblemon:fabric:${project.cobblemon_version}+${project.minecraft_version}"
 	modImplementation "net.fabricmc:fabric-language-kotlin:1.13.9+kotlin.2.3.10"
 }
 

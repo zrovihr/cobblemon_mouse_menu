@@ -1,6 +1,6 @@
 {
 	"required": true,
-	"package": "com.cobblemoninteraction.mixin.client",
+	"package": "com.cobblemonshortcuts.mixin.client",
 	"compatibilityLevel": "JAVA_21",
 	"client": [
 		"ExampleClientMixin"

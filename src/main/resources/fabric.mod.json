@@ -1,9 +1,9 @@
 {
 	"schemaVersion": 1,
-	"id": "cobblemon-interaction",
+	"id": "cobblemon-shortcuts",
 	"version": "${version}",
-	"name": "Cobblemon Interaction",
-	"description": "Cobblemon Interaction Mod",
+	"name": "Cobblemon Shortcuts",
+	"description": "Cobblemon Shortcuts Mod",
 	"authors": [
 		"Zrov"
 	],
@@ -12,20 +12,20 @@
 		"sources": "https://github.com/FabricMC/fabric-example-mod"
 	},
 	"license": "CC0-1.0",
-	"icon": "assets/cobblemon-interaction/icon.png",
-	"environment": "*",
+	"icon": "assets/cobblemon-shortcuts/icon.png",
+	"environment": "client",
 	"entrypoints": {
 		"main": [
-			"com.cobblemoninteraction.CobblemonInteraction"
+			"com.cobblemonshortcuts.CobblemonShortcuts"
 		],
 		"client": [
-			"com.cobblemoninteraction.CobblemonInteractionClient"
+          "com.cobblemonshortcuts.CobblemonShortcutsClient"
 		]
 	},
 	"mixins": [
-		"cobblemon-interaction.mixins.json",
+		"cobblemon-shortcuts.mixins.json",
 		{
-			"config": "cobblemon-interaction.client.mixins.json",
+			"config": "cobblemon-shortcuts.client.mixins.json",
 			"environment": "client"
 		}
 	],
@@ -33,6 +33,7 @@
 		"fabricloader": ">=0.18.4",
 		"minecraft": "~1.21.1",
 		"java": ">=21",
-		"fabric-api": "*"
+		"fabric-api": "*",
+		"cobblemon": "*"
 	}
 }

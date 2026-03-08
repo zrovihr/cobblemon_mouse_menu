@@ -1,4 +1,4 @@
-package com.cobblemoninteraction.mixin.client;
+package com.cobblemonshortcuts.mixin.client;
 
 import net.minecraft.client.Minecraft;
 import org.spongepowered.asm.mixin.Mixin;
