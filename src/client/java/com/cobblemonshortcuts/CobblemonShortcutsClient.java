@@ -6,6 +6,7 @@ import com.cobblemon.mod.common.client.gui.battle.subscreen.BattleBackButton;
 import com.cobblemon.mod.common.client.gui.battle.subscreen.BattleGeneralActionSelection;
 import com.cobblemon.mod.common.client.gui.battle.subscreen.BattleMoveSelection;
 import com.cobblemon.mod.common.client.gui.battle.subscreen.BattleSwitchPokemonSelection;
+import com.cobblemon.mod.common.client.gui.battle.subscreen.BattleTargetSelection;
 import com.cobblemon.mod.common.client.gui.battle.widgets.BattleOptionTile;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
@@ -52,7 +53,23 @@ public class CobblemonShortcutsClient implements ClientModInitializer {
                     if (index < moveTiles.size()) {
                         BattleMoveSelection.MoveTile tile = moveTiles.get(index);
                         if (tile.getSelectable()) {
-                            tile.onClick();
+                            // In 2v2 or larger battles, selecting a move requires a target.
+                            // The normal click path goes through BattleMoveSelection.mousePrimaryClicked()
+                            // which shows BattleTargetSelection when pokemonPerSide > 1.
+                            // We replicate that logic here to avoid a null target.
+                            int pokemonPerSide = moveSelection.getRequest().getActivePokemon().getFormat().getBattleType().getPokemonPerSide();
+                            if (pokemonPerSide > 1) {
+                                // Transition to target selection instead of selecting immediately
+                                battleGUI.changeActionSelection(new BattleTargetSelection(
+                                    battleGUI,
+                                    moveSelection.getRequest(),
+                                    tile.getMove(),
+                                    null,
+                                    null
+                                ));
+                            } else {
+                                tile.onClick();
+                            }
                         }
                     }
                 } else if (selection instanceof BattleSwitchPokemonSelection switchSelection) {
