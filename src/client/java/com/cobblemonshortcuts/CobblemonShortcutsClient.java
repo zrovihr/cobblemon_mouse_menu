@@ -82,6 +82,19 @@ public class CobblemonShortcutsClient implements ClientModInitializer {
                             selection.mousePrimaryClicked(tile.getX() + 1, tile.getY() + 1);
                         }
                     }
+                } else if (selection instanceof BattleTargetSelection targetSelection) {
+                    // Target selection: pick a target pokemon for the selected move (2v2+ battles)
+                    List<BattleTargetSelection.TargetTile> targetTiles = targetSelection.getTargetTiles();
+                    int selectableIdx = 0;
+                    for (BattleTargetSelection.TargetTile tile : targetTiles) {
+                        if (tile.getSelectable()) {
+                            if (selectableIdx == index) {
+                                tile.onClick();
+                                break;
+                            }
+                            selectableIdx++;
+                        }
+                    }
                 }
             });
         });
@@ -108,6 +121,8 @@ public class CobblemonShortcutsClient implements ClientModInitializer {
             backButton = switchSelection.getBackButton();
         } else if (selection instanceof BattleGeneralActionSelection generalSelection) {
             backButton = generalSelection.getBackButton();
+        } else if (selection instanceof BattleTargetSelection targetSelection) {
+            backButton = targetSelection.getBackButton();
         }
 
         if (backButton != null) {
