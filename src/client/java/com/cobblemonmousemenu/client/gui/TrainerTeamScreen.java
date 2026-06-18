@@ -60,6 +60,11 @@ public final class TrainerTeamScreen extends Screen {
     private int closeX, closeY, closeSize;
     // "All / Detail" view-toggle button bounds in the header.
     private int toggleX, toggleY, toggleW, toggleH;
+    // Overview is drawn in a fixed virtual canvas then scaled to fit the window. These capture that
+    // transform so mouse hit-testing (and the portrait scissor, which is in raw screen px) can undo it.
+    private boolean ovActive;
+    private float ovScale = 1f;
+    private float ovOffX, ovOffY;
 
     public TrainerTeamScreen(Component trainerName, String battleFormat, List<TeamEntry> team) {
         super(Component.literal("Trainer Team"));
@@ -87,27 +92,45 @@ public final class TrainerTeamScreen extends Screen {
         int sw = this.minecraft.getWindow().getGuiScaledWidth();
         int sh = this.minecraft.getWindow().getGuiScaledHeight();
 
-        // Overview mode uses a near-full-screen panel so a single screenshot holds the whole team
-        // sheet. Height is capped to what the rows actually need, but never exceeds the window.
-        if (overview) {
+        ovActive = overview && !team.isEmpty();
+        if (ovActive) {
+            // Lay the overview out in a fixed, roomy virtual canvas (so rows never overlap and move
+            // names fit), then scale the whole thing to fit the window. This decouples it from the
+            // integer GUI Scale entirely — small windows just render a smaller (still complete) sheet.
             int rows = Math.max(1, team.size());
-            pw = Math.min(620, sw - 8);
-            ph = Math.min(sh - 8, 34 + rows * 60);
+            pw = 600;
+            ph = 34 + rows * 64;
+            ovScale = Math.min(1f, Math.min((sw - 8) / (float) pw, (sh - 8) / (float) ph));
+            ovOffX = (sw - pw * ovScale) / 2f;
+            ovOffY = (sh - ph * ovScale) / 2f;
+            px = 0;
+            py = 0;
         } else {
             pw = Math.min(448, sw - 32);
             ph = Math.min(276, sh - 32);
+            px = (sw - pw) / 2;
+            py = (sh - ph) / 2;
         }
-        px = (sw - pw) / 2;
-        py = (sh - ph) / 2;
         bodyY = py + 24;
         leftW = 132;
+
+        if (ovActive) {
+            g.pose().pushPose();
+            g.pose().translate(ovOffX, ovOffY, 0);
+            g.pose().scale(ovScale, ovScale, 1f);
+        }
+        // Mouse position in the (possibly scaled) panel space, for header hover tests.
+        int vmx = ovActive ? (int) ((mouseX - ovOffX) / ovScale) : mouseX;
+        int vmy = ovActive ? (int) ((mouseY - ovOffY) / ovScale) : mouseY;
 
         // Panel.
         g.fill(px - 1, py - 1, px + pw + 1, py + ph + 1, 0xFF1A2030);
         g.fill(px, py, px + pw, py + ph, 0xF00C0E16);
         g.fill(px, py, px + pw, py + 2, 0xFF55AAFF);
         g.fill(px, py + ph - 2, px + pw, py + ph, 0xFF2B5C8A);
-        g.fill(px + leftW, bodyY, px + leftW + 1, py + ph - 4, 0x33FFFFFF); // divider
+        if (!overview) {
+            g.fill(px + leftW, bodyY, px + leftW + 1, py + ph - 4, 0x33FFFFFF); // detail-view divider
+        }
 
         // Header: title + battle format + count + close button.
         g.drawString(this.font, Component.literal(trainerName.getString() + "'s Team"),
@@ -117,8 +140,8 @@ public final class TrainerTeamScreen extends Screen {
         closeSize = 13;
         closeX = px + pw - closeSize - 4;
         closeY = py + 5;
-        boolean closeHover = mouseX >= closeX && mouseX < closeX + closeSize
-                && mouseY >= closeY && mouseY < closeY + closeSize;
+        boolean closeHover = vmx >= closeX && vmx < closeX + closeSize
+                && vmy >= closeY && vmy < closeY + closeSize;
         g.fill(closeX, closeY, closeX + closeSize, closeY + closeSize, closeHover ? 0xFFC8423A : 0x55FFFFFF);
         g.drawString(this.font, "✕", closeX + 3, closeY + 3, 0xFFFFFFFF, false);
 
@@ -128,8 +151,8 @@ public final class TrainerTeamScreen extends Screen {
         toggleW = this.font.width(toggleLabel) + 8;
         toggleX = closeX - toggleW - 5;
         toggleY = closeY;
-        boolean toggleHover = mouseX >= toggleX && mouseX < toggleX + toggleW
-                && mouseY >= toggleY && mouseY < toggleY + toggleH;
+        boolean toggleHover = vmx >= toggleX && vmx < toggleX + toggleW
+                && vmy >= toggleY && vmy < toggleY + toggleH;
         g.fill(toggleX, toggleY, toggleX + toggleW, toggleY + toggleH, toggleHover ? 0xFF3A6EA8 : 0x44FFFFFF);
         g.drawString(this.font, toggleLabel, toggleX + 4, toggleY + 3, 0xFFFFFFFF, false);
 
@@ -148,6 +171,7 @@ public final class TrainerTeamScreen extends Screen {
 
         if (team.isEmpty()) {
             g.drawString(this.font, "(no Pokemon)", px + 8, bodyY + 6, 0xFFAAAAAA, false);
+            if (ovActive) g.pose().popPose();
             return;
         }
         if (selected >= team.size()) {
@@ -156,6 +180,7 @@ public final class TrainerTeamScreen extends Screen {
 
         if (overview) {
             renderOverview(g, partialTick);
+            if (ovActive) g.pose().popPose();
             return;
         }
 
@@ -318,7 +343,9 @@ public final class TrainerTeamScreen extends Screen {
         int w = pw - 12;
         int bottom = py + ph - 6;
         int n = team.size();
-        int cellH = Math.max(40, (bottom - top) / n);
+        // Divide the available height evenly so the rows ALWAYS fit the panel (no min floor, which
+        // is what pushed the last row off-screen). Cap the row height so a small team isn't giant.
+        int cellH = Math.min(72, (bottom - top) / n);
         for (int i = 0; i < n; i++) {
             int y = top + i * cellH;
             if (i > 0) {
@@ -377,13 +404,16 @@ public final class TrainerTeamScreen extends Screen {
             g.drawString(this.font, trim(ni, metaW), colMeta, my, 0xFFAEB6C2, false);
         }
 
-        // Moves (2x2).
+        // Moves. Use a single full-width column (full names) only when the row is tall enough for
+        // four stacked chips; otherwise fall back to a compact 2x2 that fits. This adapts to the
+        // GUI scale and prevents the last move overflowing into the next Pokemon's row.
         g.drawString(this.font, "Moves", colMoves, y + 1, 0xFF7FD4FF, false);
-        int chipW = (movesW - 4) / 2;
+        boolean singleCol = h - 11 >= 4 * 10;
+        int chipW = singleCol ? movesW : (movesW - 4) / 2;
         for (int i = 0; i < e.moveIds().size() && i < 4; i++) {
             MoveTemplate tmpl = Moves.INSTANCE.getByNameOrDummy(e.moveIds().get(i));
-            int cx = colMoves + (i % 2) * (chipW + 4);
-            int cy = y + 11 + (i / 2) * 11;
+            int cx = singleCol ? colMoves : colMoves + (i % 2) * (chipW + 4);
+            int cy = singleCol ? y + 11 + i * 10 : y + 11 + (i / 2) * 11;
             int col = typeColor(tmpl.getElementalType().getName());
             g.fill(cx, cy, cx + chipW, cy + 9, withAlpha(col, 0xCC));
             g.drawString(this.font, trim(tmpl.getDisplayName().getString(), chipW - 4), cx + 3, cy + 1, 0xFFFFFFFF, false);
@@ -398,20 +428,17 @@ public final class TrainerTeamScreen extends Screen {
             }
         }
         Nature nature = e.nature().isEmpty() ? null : Natures.INSTANCE.getNature(e.nature());
-        // 3x2 grid of fixed-width "label value" pairs. Within each pair the label is left-aligned
-        // in a fixed field and the value is right-aligned in a fixed field, so BOTH the labels and
-        // the value digits line up vertically across all rows regardless of length.
-        int labelField = 20;   // "SpA" fits
-        int valField = 22;     // up to 3 digits
-        int pairW = Math.min(labelField + valField + 6, statsW / 3);
+        // 3x2 grid of "label value" pairs. Both the label AND the value are left-aligned at fixed
+        // offsets within each cell, so labels line up in one column and values line up in the next
+        // — and each value stays tight to its own label rather than drifting toward the next pair.
+        int labelW = 21;   // room for the widest label ("SpA") + a small gap
+        int pairW = Math.min(labelW + 28, statsW / 3);
         for (int i = 0; i < 6; i++) {
             int finalStat = computeStat(i, base[i], statAt(e.ivs(), i), statAt(e.evs(), i), e.level(), nature);
             int cellX = colStats + (i % 3) * pairW;
             int sy = y + (i / 3) * 11;
-            String val = String.valueOf(finalStat);
             g.drawString(this.font, STAT_LABELS[i], cellX, sy, 0xFF8A93A3, false);
-            int valX = cellX + labelField + valField - this.font.width(val);
-            g.drawString(this.font, val, valX, sy, statTextColor(finalStat), false);
+            g.drawString(this.font, String.valueOf(finalStat), cellX + labelW, sy, statTextColor(finalStat), false);
         }
     }
 
@@ -447,7 +474,7 @@ public final class TrainerTeamScreen extends Screen {
         }
         try {
             PoseStack pose = g.pose();
-            g.enableScissor(x, y, x + box, y + box);
+            scissorBox(g, x, y, box);
             pose.pushPose();
             // drawProfile applies scale(s, s, -s) internally and the PROFILE sprite is a quad
             // spanning x in [-1, 1] and y in [0, 2] (growing DOWNWARD from the origin). So anchor
@@ -469,7 +496,7 @@ public final class TrainerTeamScreen extends Screen {
         }
         try {
             PoseStack pose = g.pose();
-            g.enableScissor(x, y, x + box, y + box);
+            scissorBox(g, x, y, box);
             pose.pushPose();
             float scale = 13F * (box / 21F);
             pose.translate(x + box / 2.0 - 1.0, y - 12.0 * (box / 21F), 0.0);
@@ -482,6 +509,22 @@ public final class TrainerTeamScreen extends Screen {
         } catch (Throwable t) {
             disableModels(g, t);
             return false;
+        }
+    }
+
+    /**
+     * Enable a scissor for a virtual-space box. {@code enableScissor} works in raw screen pixels and
+     * ignores the PoseStack, so when the overview is scaled we must convert the box ourselves.
+     */
+    private void scissorBox(GuiGraphics g, int x, int y, int box) {
+        if (ovActive) {
+            int sx = Math.round(ovOffX + x * ovScale);
+            int sy = Math.round(ovOffY + y * ovScale);
+            int sx2 = Math.round(ovOffX + (x + box) * ovScale);
+            int sy2 = Math.round(ovOffY + (y + box) * ovScale);
+            g.enableScissor(sx, sy, sx2, sy2);
+        } else {
+            g.enableScissor(x, y, x + box, y + box);
         }
     }
 
@@ -511,28 +554,32 @@ public final class TrainerTeamScreen extends Screen {
     @Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
         if (ticks >= 1) {
+            // In overview the panel is drawn scaled; undo that transform to hit-test in panel space.
+            double mx = ovActive ? (mouseX - ovOffX) / ovScale : mouseX;
+            double my = ovActive ? (mouseY - ovOffY) / ovScale : mouseY;
+
             // Close (X) button.
-            if (mouseX >= closeX && mouseX < closeX + closeSize
-                    && mouseY >= closeY && mouseY < closeY + closeSize) {
+            if (mx >= closeX && mx < closeX + closeSize
+                    && my >= closeY && my < closeY + closeSize) {
                 this.onClose();
                 return true;
             }
             // View toggle (All / Detail).
-            if (mouseX >= toggleX && mouseX < toggleX + toggleW
-                    && mouseY >= toggleY && mouseY < toggleY + toggleH) {
+            if (mx >= toggleX && mx < toggleX + toggleW
+                    && my >= toggleY && my < toggleY + toggleH) {
                 overview = !overview;
                 return true;
             }
             // Select a list row (detail mode only).
-            if (!overview && !team.isEmpty() && mouseX >= px + 4 && mouseX <= px + leftW - 4 && mouseY >= bodyY) {
-                int idx = (int) ((mouseY - bodyY) / listRowH);
+            if (!overview && !team.isEmpty() && mx >= px + 4 && mx <= px + leftW - 4 && my >= bodyY) {
+                int idx = (int) ((my - bodyY) / listRowH);
                 if (idx >= 0 && idx < team.size()) {
                     selected = idx;
                     return true;
                 }
             }
             // Click outside the panel closes.
-            if (mouseX < px || mouseX > px + pw || mouseY < py || mouseY > py + ph) {
+            if (mx < px || mx > px + pw || my < py || my > py + ph) {
                 this.onClose();
                 return true;
             }

@@ -224,13 +224,26 @@ public class CobblemonMouseMenuClient implements ClientModInitializer {
 		Minecraft client = Minecraft.getInstance();
 		if (client.player == null) return;
 
-		List<Pokemon> party = CobblemonClient.INSTANCE.getStorage().getParty().getSlots();
-		if (slotIndex < 0 || slotIndex >= party.size()) return;
-		if (party.get(slotIndex) == null) return;
+		List<Pokemon> slots = CobblemonClient.INSTANCE.getStorage().getParty().getSlots();
+		if (slotIndex < 0 || slotIndex >= slots.size()) return;
+		Pokemon target = slots.get(slotIndex);
+		if (target == null) return;
+
+		// Hand the summary only the non-null party members (remapping the selection). The party's
+		// slot list has nulls for empty slots, and some add-ons (e.g. Mega Showdown) iterate the
+		// list Summary is opened with and NPE on a null Pokemon. Filtering avoids that crash.
+		List<Pokemon> members = new ArrayList<>();
+		int selection = 0;
+		for (Pokemon p : slots) {
+			if (p != null) {
+				if (p == target) selection = members.size();
+				members.add(p);
+			}
+		}
 
 		mouseMenuActive = false;
 		client.mouseHandler.grabMouse();
-		Summary.Companion.open(party, true, slotIndex);
+		Summary.Companion.open(members, true, selection);
 	}
 
 	@Override
