@@ -9,7 +9,7 @@ Features list:
 2. Left click on an RCT Trainer NPC.
  - *Display that Trainer's pokemon list and complete stats*.
    Required to work:
-   - https://modrinth.com/mod/rctmod (rctmod-fabric-1.21.1-0.17.6-beta.jar) PLEASE be careful with this.
+   - https://modrinth.com/mod/rctmod (rctmod-fabric-1.21.1-0.17.6-beta.jar & rctapi-fabric-1.21.1-0.14.8-beta.jar) PLEASE be careful with this.
    - and THIS mod itself (cobblemon_mouse_menu) to be installed both from SERVER and CLIENT.
    Otherwise this feature will not function. This is because the Trainer's Cobblemon data is not exposed to the Client,
    so we need the Server's permission to do so.
