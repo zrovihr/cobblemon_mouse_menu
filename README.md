@@ -14,3 +14,6 @@ Features list:
    Otherwise this feature will not function. This is because the Trainer's Cobblemon data is not exposed to the Client,
    so we need the Server's permission to do so.
 3. Left click on an already summoned Cobblemon to *QUICK INSPECT*.
+
+Tested with:
+Cobblemon-fabric-1.7.3+1.21.1.jar (COBBLEVERSE Modpack)
