@@ -19,7 +19,7 @@ loom {
 	splitEnvironmentSourceSets()
 
 	mods {
-		"cobblemon-shortcuts" {
+		"cobblemon-mousemenu" {
 			sourceSet sourceSets.main
 			sourceSet sourceSets.client
 		}
@@ -35,6 +35,12 @@ dependencies {
 	// Cobblemon - compile only, can't run in dev due to Kotlin metadata remapping bug
 	modCompileOnly "com.cobblemon:fabric:${project.cobblemon_version}+${project.minecraft_version}"
 	modImplementation "net.fabricmc:fabric-language-kotlin:1.13.9+kotlin.2.3.10"
+
+	// Radical Cobblemon Trainers (RCT) - SOFT dependency. compile-only + not bundled, so the mod
+	// runs fine without it (all RCT calls are guarded by FabricLoader.isModLoaded("rctmod")).
+	// Declaring via a `mod*` config makes Loom remap these intermediary jars to Mojang mappings.
+	modCompileOnly files("libs/rctmod-fabric-1.21.1-0.17.6-beta.jar")
+	modCompileOnly files("libs/rctapi-fabric-1.21.1-0.14.8-beta.jar")
 }
 
 processResources {
@@ -68,7 +74,7 @@ jar {
 tasks.register('copyToMods', Copy) {
 	dependsOn remapJar
 	from(remapJar.archiveFile)
-	into("/home/zanzrovihr/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/instances/1.21.1 Fabric Dev/minecraft/mods")
+	into("${System.getProperty('user.home')}/AppData/Roaming/PrismLauncher/instances/Cobbleverse/minecraft/mods")
 }
 build.finalizedBy copyToMods
 

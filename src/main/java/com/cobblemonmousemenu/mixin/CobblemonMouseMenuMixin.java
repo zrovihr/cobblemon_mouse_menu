@@ -1,4 +1,4 @@
-package com.cobblemonshortcuts.mixin;
+package com.cobblemonmousemenu.mixin;
 
 import net.minecraft.server.MinecraftServer;
 import org.spongepowered.asm.mixin.Mixin;
@@ -7,9 +7,8 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(MinecraftServer.class)
-public class CobblemonMixin {
+public class CobblemonMouseMenuMixin {
 	@Inject(at = @At("HEAD"), method = "loadLevel")
-	private void onTargetMethod(CallbackInfo info) {
-		// This code is injected into the start of MinecraftServer.loadLevel()V
+	private void onLoadLevel(CallbackInfo info) {
 	}
 }

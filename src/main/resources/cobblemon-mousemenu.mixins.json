@@ -1,9 +1,9 @@
 {
 	"required": true,
-	"package": "com.cobblemonshortcuts.mixin",
+	"package": "com.cobblemonmousemenu.mixin",
 	"compatibilityLevel": "JAVA_21",
 	"mixins": [
-      "CobblemonMixin"
+		"CobblemonMouseMenuMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

@@ -32,9 +32,17 @@ bin/
 
 run/
 
+# Local soft-dependency jars (unmodified third-party mods, used compile-only / not bundled).
+# Build prerequisite, not committed. See libs/README.md (kept) for what to drop here.
+libs/*
+!libs/README.md
+
 # java
 
 hs_err_*.log
 replay_*.log
 *.hprof
 *.jfr
+
+# Stray local dev instance (PrismLauncher) - never commit
+home/

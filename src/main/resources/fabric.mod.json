@@ -1,9 +1,9 @@
 {
 	"schemaVersion": 1,
-	"id": "cobblemon-shortcuts",
+	"id": "cobblemon-mousemenu",
 	"version": "${version}",
-	"name": "Cobblemon Shortcuts",
-	"description": "Cobblemon Shortcuts Mod",
+	"name": "Cobblemon Mouse Menu",
+	"description": "Cobblemon Mouse Menu Mod",
 	"authors": [
 		"Zrov"
 	],
@@ -12,20 +12,20 @@
 		"sources": "https://github.com/FabricMC/fabric-example-mod"
 	},
 	"license": "CC0-1.0",
-	"icon": "assets/cobblemon-shortcuts/icon.png",
-	"environment": "client",
+	"icon": "assets/cobblemon-mousemenu/icon.png",
+	"environment": "*",
 	"entrypoints": {
 		"main": [
-			"com.cobblemonshortcuts.CobblemonShortcuts"
+			"com.cobblemonmousemenu.CobblemonMouseMenu"
 		],
 		"client": [
-          "com.cobblemonshortcuts.CobblemonShortcutsClient"
+			"com.cobblemonmousemenu.CobblemonMouseMenuClient"
 		]
 	},
 	"mixins": [
-		"cobblemon-shortcuts.mixins.json",
+		"cobblemon-mousemenu.mixins.json",
 		{
-			"config": "cobblemon-shortcuts.client.mixins.json",
+			"config": "cobblemon-mousemenu.client.mixins.json",
 			"environment": "client"
 		}
 	],
