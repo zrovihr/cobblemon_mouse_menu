@@ -12,8 +12,13 @@ import com.cobblemon.mod.common.client.render.models.blockbench.FloatingState;
 import com.cobblemon.mod.common.pokemon.Nature;
 import com.cobblemon.mod.common.pokemon.Species;
 import com.cobblemonmousemenu.CobblemonMouseMenu;
+import com.cobblemonmousemenu.CobblemonMouseMenuClient;
+import com.cobblemonmousemenu.net.MatchupEntry;
+import com.cobblemonmousemenu.net.RequestMatchupPayload;
 import com.cobblemonmousemenu.net.TeamEntry;
 import com.mojang.blaze3d.vertex.PoseStack;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
@@ -47,12 +52,39 @@ public final class TrainerTeamScreen extends Screen {
 
     private static boolean modelsBroken = false;
 
+    /** The currently open screen, so the async matchup reply can find it. Set on open, cleared on close. */
+    private static TrainerTeamScreen current = null;
+
+    // Saved-counters cache (client-side, session-lived). Populated by "Save Result", read back by the
+    // mouse-menu HUD button and the read-only saved view. Survives closing the screen / re-opening.
+    private static List<MatchupEntry> savedMatchup = null;
+    private static String savedTrainer = "";
+    private static int savedMaxLevel = 0;
+
+    private final int entityId;
     private final Component trainerName;
     private final String battleFormat;
     private final List<TeamEntry> team;
+    /** Read-only snapshot view of {@link #savedMatchup}: no team, no scan controls, just the list. */
+    private final boolean savedView;
     private int selected = 0;
     private int ticks = 0;
     private boolean overview = false;
+
+    // Counters (best-lead advisor) state.
+    private boolean counters = false;          // showing the counters view
+    private boolean matchupLoading = false;    // request sent, awaiting the server's reply
+    private List<MatchupEntry> matchup = null;  // null until the first reply arrives
+    private int countersScroll = 0;            // first visible row index
+    private String maxLevelInput = "";         // user-typed level cap; empty = no cap
+    private int activeMaxLevel = 0;            // cap actually used for the shown results
+    private boolean levelFocused = false;      // the level input has keyboard focus
+    private int saveConfirmTicks = -1000;      // tick the last save happened (for the inline "✔ Saved")
+    // "Find counters" / "Back" header button bounds, recomputed each frame.
+    private int cntX, cntY, cntW, cntH;
+    // Counters-view control bounds (level input + Scan + Save Result), recomputed each frame.
+    private int inX, inY, inW, inH, scanX, scanY, scanW, scanH;
+    private int saveX, saveY, saveW, saveH;
 
     // Layout, recomputed each frame; read by mouseClicked.
     private int px, py, pw, ph, bodyY, leftW, listRowH;
@@ -66,16 +98,121 @@ public final class TrainerTeamScreen extends Screen {
     private float ovScale = 1f;
     private float ovOffX, ovOffY;
 
-    public TrainerTeamScreen(Component trainerName, String battleFormat, List<TeamEntry> team) {
+    public TrainerTeamScreen(int entityId, Component trainerName, String battleFormat, List<TeamEntry> team) {
         super(Component.literal("Trainer Team"));
+        this.entityId = entityId;
         this.trainerName = trainerName;
         this.battleFormat = battleFormat == null ? "" : battleFormat;
         this.team = team;
+        this.savedView = false;
+        current = this;
+    }
+
+    /** Read-only snapshot constructor: shows a saved counters list with no team and no scan controls. */
+    private TrainerTeamScreen(List<MatchupEntry> savedEntries, String savedName, int savedLevel) {
+        super(Component.literal("Saved Counters"));
+        this.entityId = -1;
+        this.trainerName = Component.literal(savedName);
+        this.battleFormat = "";
+        this.team = java.util.Collections.emptyList();
+        this.savedView = true;
+        this.counters = true;
+        this.matchup = savedEntries;
+        this.activeMaxLevel = savedLevel;
+        current = this;
+    }
+
+    /** True once the player has saved a counters result this session. */
+    public static boolean hasSavedCounters() {
+        return savedMatchup != null && !savedMatchup.isEmpty();
+    }
+
+    /** The trainer name attached to the saved counters (for the HUD button label). */
+    public static String savedTrainerName() {
+        return savedTrainer;
+    }
+
+    /** Open the saved counters as a read-only screen. No-op if nothing has been saved. */
+    public static void openSaved() {
+        if (!hasSavedCounters()) {
+            return;
+        }
+        CobblemonMouseMenuClient.closeMouseMenu();
+        Minecraft.getInstance().setScreen(new TrainerTeamScreen(savedMatchup, savedTrainer, savedMaxLevel));
+    }
+
+    /** Store the currently shown counters so they can be reopened later from the mouse menu. */
+    private void saveCurrent() {
+        if (matchup == null || matchup.isEmpty()) {
+            return;
+        }
+        savedMatchup = new java.util.ArrayList<>(matchup);
+        savedTrainer = trainerName.getString();
+        savedMaxLevel = activeMaxLevel;
+        saveConfirmTicks = ticks;
+        if (this.minecraft != null && this.minecraft.player != null) {
+            this.minecraft.player.displayClientMessage(
+                    Component.literal("§a✔ Counters saved to the Cobblemon Mouse Menu — reopen them anytime from the mouse-menu overlay."),
+                    false);
+        }
     }
 
     @Override
     public boolean isPauseScreen() {
         return false;
+    }
+
+    @Override
+    public void onClose() {
+        if (current == this) {
+            current = null;
+        }
+        super.onClose();
+    }
+
+    /**
+     * Receive the server's ranked counters (called on the main thread). Stored only if this is still
+     * the open screen for the same trainer the request was made for.
+     */
+    public static void deliverMatchup(int entityId, List<MatchupEntry> entries) {
+        if (current != null && current.entityId == entityId) {
+            current.matchup = entries;
+            current.matchupLoading = false;
+            current.countersScroll = 0;
+        }
+    }
+
+    /** Open the counters view. The user sets an optional level cap, then hits Scan. */
+    private void openCounters() {
+        counters = true;
+        levelFocused = true; // ready to type a cap immediately
+    }
+
+    /** Ask the server to rank our roster (filtered to the typed level cap) against this team. */
+    private void scanCounters() {
+        int maxLevel = parseMaxLevel();
+        activeMaxLevel = maxLevel;
+        countersScroll = 0;
+        if (ClientPlayNetworking.canSend(RequestMatchupPayload.TYPE)) {
+            matchupLoading = true;
+            matchup = null;
+            ClientPlayNetworking.send(new RequestMatchupPayload(entityId, team, maxLevel));
+        } else {
+            matchup = java.util.Collections.emptyList(); // server lacks this mod; show the empty state
+        }
+    }
+
+    /** Typed cap as an int; empty or invalid -> 0 (no cap). Clamped to a sane 1..100. */
+    private int parseMaxLevel() {
+        String s = maxLevelInput.trim();
+        if (s.isEmpty()) {
+            return 0;
+        }
+        try {
+            return Math.max(0, Math.min(100, Integer.parseInt(s)));
+        } catch (NumberFormatException ex) {
+            return 0;
+        }
     }
 
     @Override
@@ -92,7 +229,7 @@ public final class TrainerTeamScreen extends Screen {
         int sw = this.minecraft.getWindow().getGuiScaledWidth();
         int sh = this.minecraft.getWindow().getGuiScaledHeight();
 
-        ovActive = overview && !team.isEmpty();
+        ovActive = overview && !team.isEmpty() && !counters;
         if (ovActive) {
             // Lay the overview out in a fixed, roomy virtual canvas (so rows never overlap and move
             // names fit), then scale the whole thing to fit the window. This decouples it from the
@@ -128,13 +265,15 @@ public final class TrainerTeamScreen extends Screen {
         g.fill(px, py, px + pw, py + ph, 0xF00C0E16);
         g.fill(px, py, px + pw, py + 2, 0xFF55AAFF);
         g.fill(px, py + ph - 2, px + pw, py + ph, 0xFF2B5C8A);
-        if (!overview) {
+        if (!overview && !counters) {
             g.fill(px + leftW, bodyY, px + leftW + 1, py + ph - 4, 0x33FFFFFF); // detail-view divider
         }
 
         // Header: title + battle format + count + close button.
-        g.drawString(this.font, Component.literal(trainerName.getString() + "'s Team"),
-                px + 8, py + 8, 0xFF7FD4FF, true);
+        String headerTitle = savedView
+                ? "Saved counters · " + trainerName.getString()
+                : trainerName.getString() + "'s Team";
+        g.drawString(this.font, Component.literal(headerTitle), px + 8, py + 8, 0xFF7FD4FF, true);
 
         // Close (X) button, far right.
         closeSize = 13;
@@ -146,21 +285,42 @@ public final class TrainerTeamScreen extends Screen {
         g.drawString(this.font, "✕", closeX + 3, closeY + 3, 0xFFFFFFFF, false);
 
         // View toggle: switch between the single-Pokemon detail and the all-team overview sheet.
+        // Hidden while the counters view is up (it doesn't apply there) but its X still anchors layout.
         String toggleLabel = overview ? "Detail" : "All";
         toggleH = closeSize;
         toggleW = this.font.width(toggleLabel) + 8;
         toggleX = closeX - toggleW - 5;
         toggleY = closeY;
-        boolean toggleHover = vmx >= toggleX && vmx < toggleX + toggleW
-                && vmy >= toggleY && vmy < toggleY + toggleH;
-        g.fill(toggleX, toggleY, toggleX + toggleW, toggleY + toggleH, toggleHover ? 0xFF3A6EA8 : 0x44FFFFFF);
-        g.drawString(this.font, toggleLabel, toggleX + 4, toggleY + 3, 0xFFFFFFFF, false);
+        if (!counters) {
+            boolean toggleHover = vmx >= toggleX && vmx < toggleX + toggleW
+                    && vmy >= toggleY && vmy < toggleY + toggleH;
+            g.fill(toggleX, toggleY, toggleX + toggleW, toggleY + toggleH, toggleHover ? 0xFF3A6EA8 : 0x44FFFFFF);
+            g.drawString(this.font, toggleLabel, toggleX + 4, toggleY + 3, 0xFFFFFFFF, false);
+        }
 
-        int rightX = toggleX - 6;
-        String count = team.size() + "/6";
-        rightX -= this.font.width(count);
-        g.drawString(this.font, count, rightX, py + 8, 0xFF8090A0, false);
-        if (!battleFormat.isEmpty()) {
+        // Counters advisor button, left of the toggle. Toggles into the counters view (or back).
+        // Hidden in the read-only saved view (there's no team to switch back to); the X closes it.
+        cntH = closeSize;
+        cntX = toggleX;
+        cntY = closeY;
+        cntW = 0;
+        if (!savedView) {
+            String cntLabel = counters ? "Back" : "Find counters";
+            cntW = this.font.width(cntLabel) + 8;
+            cntX = toggleX - cntW - 5;
+            boolean cntHover = vmx >= cntX && vmx < cntX + cntW && vmy >= cntY && vmy < cntY + cntH;
+            int cntBg = counters ? (cntHover ? 0xFF3A6EA8 : 0x44FFFFFF) : (cntHover ? 0xFF2E8B57 : 0x553AC878);
+            g.fill(cntX, cntY, cntX + cntW, cntY + cntH, cntBg);
+            g.drawString(this.font, cntLabel, cntX + 4, cntY + 3, 0xFFFFFFFF, false);
+        }
+
+        int rightX = cntX - 6;
+        if (!savedView) {
+            String count = team.size() + "/6";
+            rightX -= this.font.width(count);
+            g.drawString(this.font, count, rightX, py + 8, 0xFF8090A0, false);
+        }
+        if (!savedView && !battleFormat.isEmpty()) {
             String fmt = battleFormat;
             int w = this.font.width(fmt) + 8;
             rightX -= w + 6;
@@ -169,13 +329,18 @@ public final class TrainerTeamScreen extends Screen {
             g.drawString(this.font, fmt, rightX + 4, py + 8, 0xFFFFFFFF, false);
         }
 
-        if (team.isEmpty()) {
+        if (team.isEmpty() && !savedView) {
             g.drawString(this.font, "(no Pokemon)", px + 8, bodyY + 6, 0xFFAAAAAA, false);
             if (ovActive) g.pose().popPose();
             return;
         }
-        if (selected >= team.size()) {
+        if (!team.isEmpty() && selected >= team.size()) {
             selected = 0;
+        }
+
+        if (counters) {
+            renderCounters(g, mouseX, mouseY);
+            return;
         }
 
         if (overview) {
@@ -465,6 +630,202 @@ public final class TrainerTeamScreen extends Screen {
     }
 
     // ---------------------------------------------------------------------------------------------
+    // Counters (best-lead advisor)
+    // ---------------------------------------------------------------------------------------------
+
+    private int countersMaxScroll = 0;
+
+    /** The ranked "best counters" list: your party + PC scored against the team currently shown. */
+    private void renderCounters(GuiGraphics g, int mouseX, int mouseY) {
+        int x0 = px + 8;
+        int top = bodyY + 2;
+        int w = pw - 16;
+        int bottom = py + ph - 6;
+
+        String capSuffix = (matchup != null && activeMaxLevel > 0 ? "  ·  ≤ Lv " + activeMaxLevel : "");
+        String title = (savedView ? "Saved leads vs " + trainerName.getString() : "Your best leads vs this team")
+                + capSuffix;
+        g.drawString(this.font, trim(title, w - 6), x0, top, 0xFF7FD4FF, false);
+
+        // Control bar, right-aligned: "Max lvl [input] [Scan]". Hidden in the read-only saved view.
+        if (!savedView) {
+            scanW = this.font.width("Scan") + 10;
+            scanX = x0 + w - scanW;
+            scanY = top - 3;
+            scanH = 13;
+            boolean scanHover = mouseX >= scanX && mouseX < scanX + scanW && mouseY >= scanY && mouseY < scanY + scanH;
+            g.fill(scanX, scanY, scanX + scanW, scanY + scanH, scanHover ? 0xFF2E8B57 : 0x553AC878);
+            g.drawString(this.font, "Scan", scanX + 5, scanY + 3, 0xFFFFFFFF, false);
+
+            inW = 32;
+            inX = scanX - inW - 4;
+            inY = scanY;
+            inH = scanH;
+            g.fill(inX - 1, inY - 1, inX + inW + 1, inY + inH + 1, levelFocused ? 0xFF55AAFF : 0xFF3A4456);
+            g.fill(inX, inY, inX + inW, inY + inH, 0xFF11151E);
+            String shown = maxLevelInput.isEmpty() ? "any" : maxLevelInput;
+            g.drawString(this.font, shown, inX + 4, inY + 3, maxLevelInput.isEmpty() ? 0xFF6A7686 : 0xFFFFFFFF, false);
+            if (levelFocused && (ticks / 6) % 2 == 0) {
+                int cx = inX + 4 + this.font.width(maxLevelInput);
+                g.fill(cx, inY + 2, cx + 1, inY + inH - 2, 0xFFCCCCCC);
+            }
+            String lbl = "Max lvl";
+            g.drawString(this.font, lbl, inX - this.font.width(lbl) - 4, top, 0xFFAEB6C2, false);
+        }
+
+        int listTop = top + 17;
+        saveW = 0; // only the populated-results branch below re-enables the Save button
+
+        if (matchupLoading) {
+            centerMsg(g, "Calculating best counters…", x0, w, listTop, bottom, 0xFFB8C0CC);
+            countersMaxScroll = 0;
+            return;
+        }
+        if (matchup == null) {
+            centerMsg(g, "Set a max level if you have a cap, then Scan.", x0, w, listTop, bottom, 0xFFB8C0CC);
+            countersMaxScroll = 0;
+            return;
+        }
+        if (matchup.isEmpty()) {
+            String msg = activeMaxLevel > 0
+                    ? "No counters at or below Lv " + activeMaxLevel + " in your party or PC."
+                    : "No usable counters found in your party or PC.";
+            centerMsg(g, msg, x0, w, listTop, bottom, 0xFFE0A0A0);
+            countersMaxScroll = 0;
+            return;
+        }
+
+        // Reserve a bottom strip for the action row (Save Result + scroll hint).
+        int listBottom = bottom - 16;
+        int rowH = 32;
+        int visible = Math.max(1, (listBottom - listTop) / rowH);
+        countersMaxScroll = Math.max(0, matchup.size() - visible);
+        if (countersScroll > countersMaxScroll) {
+            countersScroll = countersMaxScroll;
+        }
+
+        for (int v = 0; v < visible && (countersScroll + v) < matchup.size(); v++) {
+            int idx = countersScroll + v;
+            renderCounterRow(g, matchup.get(idx), idx + 1, x0, listTop + v * rowH, w, rowH - 2);
+        }
+
+        // Action row: "Save Result" on the left (live view only), scroll hint on the right.
+        if (!savedView) {
+            String saveLabel = "Save Result";
+            saveW = this.font.width(saveLabel) + 12;
+            saveH = 13;
+            saveX = x0;
+            saveY = bottom - saveH;
+            boolean saveHover = mouseX >= saveX && mouseX < saveX + saveW && mouseY >= saveY && mouseY < saveY + saveH;
+            g.fill(saveX, saveY, saveX + saveW, saveY + saveH, saveHover ? 0xFF3A6EA8 : 0x553A86C8);
+            g.drawString(this.font, saveLabel, saveX + 6, saveY + 3, 0xFFFFFFFF, false);
+            if (ticks - saveConfirmTicks < 80) {
+                g.drawString(this.font, "✔ Saved to mouse menu", saveX + saveW + 8, saveY + 3, 0xFF7FE0A0, false);
+            }
+        } else {
+            saveW = 0;
+            g.drawString(this.font, "Snapshot — scan again for current data", x0, bottom - 9, 0xFF6A7686, false);
+        }
+
+        // Scroll hint when the list overflows.
+        if (countersMaxScroll > 0) {
+            String more = (countersScroll + visible < matchup.size()) ? "▼ scroll for more" : "▲ scroll up";
+            g.drawString(this.font, more, x0 + w - this.font.width(more), bottom - 9, 0xFF6A7686, false);
+        }
+    }
+
+    private void renderCounterRow(GuiGraphics g, MatchupEntry e, int rank, int x, int y, int w, int h) {
+        g.fill(x, y, x + w, y + h, (rank % 2 == 0) ? 0x14FFFFFF : 0x1EFFFFFF);
+
+        // Rank.
+        String rk = "#" + rank;
+        g.drawString(this.font, rk, x + 3, y + h / 2 - 4, 0xFFAEB6C2, false);
+        int px2 = x + 3 + this.font.width("#12") + 2;
+
+        // Portrait.
+        int box = Math.min(h, 28);
+        Species species = resolveSpecies(e.speciesId());
+        int iy = y + (h - box) / 2;
+        if (!renderThumb(g, species, state(e.aspects(), e.shiny()), px2, iy, box, 0F)) {
+            String letter = e.name().isEmpty() ? "?" : e.name().substring(0, 1).toUpperCase(Locale.ROOT);
+            g.drawString(this.font, letter, px2 + box / 2 - 3, iy + box / 2 - 4, 0xFFB0B0B0, false);
+        }
+
+        int tx = px2 + box + 4;
+        int rightW = 92;                 // reserved for verdict + incoming on the right
+        int midW = x + w - rightW - tx;
+
+        // Name + location chip.
+        boolean inPc = e.location().startsWith("Box");
+        String name = trim(e.name(), midW - 4);
+        g.drawString(this.font, name, tx, y + 2, 0xFFFFFFFF, true);
+
+        // Target: which single enemy this row's move is rated against (right-aligned on the name line).
+        // The OHKO / % on line 2 refers to THIS enemy only — not the whole team.
+        if (!e.bestTarget().isEmpty() && !e.bestMoveId().isEmpty()) {
+            String verb = e.bestDmgPct() >= 100 ? "OHKOs " : "best vs ";
+            int avail = midW - this.font.width(name) - 8;
+            String tgt = trim("▶ " + verb + e.bestTarget(), Math.max(0, avail));
+            if (this.font.width(tgt) >= this.font.width("▶ …")) {
+                int tCol = e.bestDmgPct() >= 100 ? 0xFF8FE0A0 : 0xFFC8B070;
+                g.drawString(this.font, tgt, tx + midW - this.font.width(tgt), y + 2, tCol, false);
+            }
+        }
+        int locX = tx;
+        int locY = y + 13;
+        int locW = this.font.width(e.location()) + 6;
+        // Amber for PC (you must withdraw it first); slate for party.
+        g.fill(locX, locY, locX + locW, locY + 10, inPc ? 0xFFB5791F : 0x553A6EA8);
+        g.drawString(this.font, e.location(), locX + 3, locY + 1, 0xFFFFFFFF, false);
+
+        // Best move chip + damage, to the right of the location chip.
+        int moveX = locX + locW + 5;
+        if (!e.bestMoveId().isEmpty()) {
+            String moveName = Moves.INSTANCE.getByNameOrDummy(e.bestMoveId()).getDisplayName().getString();
+            String dmg = e.bestDmgPct() >= 100 ? "OHKO" : (e.bestDmgPct() + "%");
+            String chip = trim(moveName, midW - (moveX - tx) - this.font.width(" " + dmg) - 8) + " " + dmg;
+            int col = typeColor(e.bestMoveType());
+            int cw = this.font.width(chip) + 6;
+            g.fill(moveX, locY, moveX + cw, locY + 10, withAlpha(col, 0xCC));
+            g.drawString(this.font, chip, moveX + 3, locY + 1, 0xFFFFFFFF, false);
+        } else {
+            g.drawString(this.font, "no damaging move", moveX, locY + 1, 0xFF9098A4, false);
+        }
+
+        // Right column: verdict (top) + incoming threat & speed (bottom).
+        int verdictCol = verdictColor(e.score());
+        String verdict = verdictLabel(e.score());
+        g.drawString(this.font, verdict, x + w - this.font.width(verdict) - 2, y + 2, verdictCol, false);
+
+        String threat = "takes " + Math.min(e.worstIncomingPct(), 999) + "%";
+        int threatCol = e.worstIncomingPct() >= 100 ? 0xFFE0726A : (e.worstIncomingPct() >= 50 ? 0xFFE0C868 : 0xFF9AA4B2);
+        int threatX = x + w - this.font.width(threat) - 2;
+        g.drawString(this.font, threat, threatX, y + 13, threatCol, false);
+        if (e.outspeedsAll()) {
+            String fast = "⚡";
+            g.drawString(this.font, fast, threatX - this.font.width(fast) - 3, y + 13, 0xFFF8D24A, false);
+        }
+    }
+
+    private void centerMsg(GuiGraphics g, String msg, int x0, int w, int listTop, int bottom, int color) {
+        g.drawString(this.font, msg, x0 + (w - this.font.width(msg)) / 2, (listTop + bottom) / 2 - 4, color, false);
+    }
+
+    private static String verdictLabel(int score) {
+        if (score >= 60) return "Hard counter";
+        if (score >= 25) return "Favorable";
+        if (score >= -10) return "Even";
+        return "Risky";
+    }
+
+    private static int verdictColor(int score) {
+        if (score >= 60) return 0xFF55E08A;
+        if (score >= 25) return 0xFF7FD4FF;
+        if (score >= -10) return 0xFFE0C868;
+        return 0xFFE0726A;
+    }
+
+    // ---------------------------------------------------------------------------------------------
     // Model rendering
     // ---------------------------------------------------------------------------------------------
 
@@ -491,6 +852,10 @@ public final class TrainerTeamScreen extends Screen {
     }
 
     private boolean renderThumb(GuiGraphics g, Species species, TeamEntry e, int x, int y, int box, float partialTick) {
+        return renderThumb(g, species, state(e), x, y, box, partialTick);
+    }
+
+    private boolean renderThumb(GuiGraphics g, Species species, FloatingState st, int x, int y, int box, float partialTick) {
         if (modelsBroken || species == null) {
             return false;
         }
@@ -501,7 +866,7 @@ public final class TrainerTeamScreen extends Screen {
             float scale = 13F * (box / 21F);
             pose.translate(x + box / 2.0 - 1.0, y - 12.0 * (box / 21F), 0.0);
             GuiUtilsKt.drawPosablePortrait(
-                    species.getResourceIdentifier(), pose, scale, 1F, false, state(e), partialTick,
+                    species.getResourceIdentifier(), pose, scale, 1F, false, st, partialTick,
                     0F, 0F, 0F, 0F, 0F, false, 1F, 1F, 1F, 1F);
             pose.popPose();
             g.disableScissor();
@@ -529,12 +894,16 @@ public final class TrainerTeamScreen extends Screen {
     }
 
     private static FloatingState state(TeamEntry e) {
+        return state(e.aspects(), e.shiny());
+    }
+
+    private static FloatingState state(List<String> aspects, boolean shiny) {
         FloatingState s = new FloatingState();
-        Set<String> aspects = new HashSet<>(e.aspects());
-        if (e.shiny()) {
-            aspects.add("shiny");
+        Set<String> set = new HashSet<>(aspects);
+        if (shiny) {
+            set.add("shiny");
         }
-        s.setCurrentAspects(aspects);
+        s.setCurrentAspects(set);
         return s;
     }
 
@@ -564,14 +933,39 @@ public final class TrainerTeamScreen extends Screen {
                 this.onClose();
                 return true;
             }
-            // View toggle (All / Detail).
-            if (mx >= toggleX && mx < toggleX + toggleW
+            // Counters button (Find counters / Back).
+            if (mx >= cntX && mx < cntX + cntW && my >= cntY && my < cntY + cntH) {
+                if (counters) {
+                    counters = false;
+                } else {
+                    openCounters();
+                }
+                return true;
+            }
+            // Counters-view controls: save the result, focus the level input, or run a scan.
+            if (counters && !savedView) {
+                if (saveW > 0 && mx >= saveX && mx < saveX + saveW && my >= saveY && my < saveY + saveH) {
+                    saveCurrent();
+                    return true;
+                }
+                if (mx >= inX && mx < inX + inW && my >= inY && my < inY + inH) {
+                    levelFocused = true;
+                    return true;
+                }
+                if (mx >= scanX && mx < scanX + scanW && my >= scanY && my < scanY + scanH) {
+                    scanCounters();
+                    return true;
+                }
+                levelFocused = false; // clicked elsewhere in the panel
+            }
+            // View toggle (All / Detail) — inert while the counters view is up.
+            if (!counters && mx >= toggleX && mx < toggleX + toggleW
                     && my >= toggleY && my < toggleY + toggleH) {
                 overview = !overview;
                 return true;
             }
             // Select a list row (detail mode only).
-            if (!overview && !team.isEmpty() && mx >= px + 4 && mx <= px + leftW - 4 && my >= bodyY) {
+            if (!overview && !counters && !team.isEmpty() && mx >= px + 4 && mx <= px + leftW - 4 && my >= bodyY) {
                 int idx = (int) ((my - bodyY) / listRowH);
                 if (idx >= 0 && idx < team.size()) {
                     selected = idx;
@@ -588,8 +982,45 @@ public final class TrainerTeamScreen extends Screen {
     }
 
     @Override
+    public boolean mouseScrolled(double mouseX, double mouseY, double scrollX, double scrollY) {
+        if (counters && matchup != null && !matchup.isEmpty()) {
+            countersScroll = clamp(countersScroll - (int) Math.signum(scrollY), 0, countersMaxScroll);
+            return true;
+        }
+        return super.mouseScrolled(mouseX, mouseY, scrollX, scrollY);
+    }
+
+    @Override
+    public boolean charTyped(char chr, int modifiers) {
+        if (counters && levelFocused && Character.isDigit(chr) && maxLevelInput.length() < 3) {
+            maxLevelInput += chr;
+            return true;
+        }
+        return super.charTyped(chr, modifiers);
+    }
+
+    @Override
     public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
-        if (!team.isEmpty()) {
+        if (counters) {
+            if (keyCode == 257 || keyCode == 335) { // enter / numpad enter -> scan
+                scanCounters();
+                return true;
+            }
+            if (levelFocused && keyCode == 259) { // backspace
+                if (!maxLevelInput.isEmpty()) {
+                    maxLevelInput = maxLevelInput.substring(0, maxLevelInput.length() - 1);
+                }
+                return true;
+            }
+            if (keyCode == 264) { // down
+                countersScroll = clamp(countersScroll + 1, 0, countersMaxScroll);
+                return true;
+            }
+            if (keyCode == 265) { // up
+                countersScroll = clamp(countersScroll - 1, 0, countersMaxScroll);
+                return true;
+            }
+        } else if (!team.isEmpty()) {
             if (keyCode == 264) { // down
                 selected = (selected + 1) % team.size();
                 return true;
@@ -600,6 +1031,10 @@ public final class TrainerTeamScreen extends Screen {
             }
         }
         return super.keyPressed(keyCode, scanCode, modifiers);
+    }
+
+    private static int clamp(int v, int lo, int hi) {
+        return Math.max(lo, Math.min(hi, v));
     }
 
     // ---------------------------------------------------------------------------------------------

@@ -82,6 +82,12 @@ public final class TrainerTeamClient {
             }
         });
 
+        // Matchup answer: the server's ranked counters for the team currently on screen. Route into
+        // the open screen on the main thread.
+        ClientPlayNetworking.registerGlobalReceiver(MatchupPayload.TYPE, (payload, context) ->
+                context.client().execute(() ->
+                        TrainerTeamScreen.deliverMatchup(payload.entityId(), payload.entries())));
+
         // Free-cursor picking happens once entities are placed for the frame.
         WorldRenderEvents.AFTER_ENTITIES.register(TrainerTeamClient::pickHoveredTrainer);
 
@@ -94,7 +100,7 @@ public final class TrainerTeamClient {
         // Drop menu mode first so the opening click can't leak through to the new screen and so the
         // per-frame tick doesn't grab the cursor out from under it.
         CobblemonMouseMenuClient.closeMouseMenu();
-        Minecraft.getInstance().setScreen(new TrainerTeamScreen(name, battleFormat, team));
+        Minecraft.getInstance().setScreen(new TrainerTeamScreen(entityId, name, battleFormat, team));
     }
 
     /** Called by the mouse mixin on left-click while the menu is active, after the party-slot check. */
@@ -115,6 +121,19 @@ public final class TrainerTeamClient {
         if (DEBUG) debugLog("CLICK trainer=" + hoveredEntityId + " -> show via " + hoveredSource.getClass().getSimpleName());
         hoveredSource.show(entity);
         return true;
+    }
+
+    /** Called by the mouse mixin on right-click while the menu is active, after the party-slot check. */
+    public static boolean onRightClick() {
+        Minecraft client = Minecraft.getInstance();
+        if (hoveredEntityId < 0 || hoveredSource == null || client.level == null) {
+            return false;
+        }
+        Entity entity = client.level.getEntity(hoveredEntityId);
+        if (entity == null) {
+            return false;
+        }
+        return hoveredSource.onRightClick(entity);
     }
 
     private static TrainerSource sourceFor(Entity entity) {

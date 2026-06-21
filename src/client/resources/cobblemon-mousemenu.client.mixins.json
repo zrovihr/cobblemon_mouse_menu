@@ -3,7 +3,8 @@
 	"package": "com.cobblemonmousemenu.mixin.client",
 	"compatibilityLevel": "JAVA_21",
 	"client": [
-		"MouseMenuClientMixin"
+		"MouseMenuClientMixin",
+		"PCGUIMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

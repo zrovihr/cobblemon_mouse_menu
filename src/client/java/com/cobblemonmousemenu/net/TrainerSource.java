@@ -30,4 +30,12 @@ public interface TrainerSource {
     default String hoverLabel() {
         return "Click to view team";
     }
+
+    /**
+     * Right-click action over a hovered entity of this source. Returns true if it was handled.
+     * Default: nothing (most trainer sources only support left-click to view the team).
+     */
+    default boolean onRightClick(Entity entity) {
+        return false;
+    }
 }

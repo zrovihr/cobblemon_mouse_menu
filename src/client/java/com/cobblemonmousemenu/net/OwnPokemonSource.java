@@ -66,6 +66,15 @@ public final class OwnPokemonSource implements TrainerSource {
 
     @Override
     public String hoverLabel() {
-        return "Click to inspect";
+        return "Inspect · right-click for actions";
+    }
+
+    /** Right-click a sent-out Pokemon: open the same context menu as its party slot, at the cursor. */
+    @Override
+    public boolean onRightClick(Entity entity) {
+        if (!(entity instanceof PokemonEntity pe) || CobblemonClient.INSTANCE == null) {
+            return false;
+        }
+        return CobblemonMouseMenuClient.openContextMenuForEntity(pe);
     }
 }

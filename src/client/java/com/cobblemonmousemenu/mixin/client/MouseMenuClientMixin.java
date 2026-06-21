@@ -33,17 +33,24 @@ public class MouseMenuClientMixin {
 					return;
 				}
 				if (button == GLFW.GLFW_MOUSE_BUTTON_LEFT) {
-					int slot = CobblemonMouseMenuClient.getSlotAtMouse(client);
-					if (slot >= 0) {
-						CobblemonMouseMenuClient.openSummaryForSlot(slot);
+					if (CobblemonMouseMenuClient.clickSavedCountersButton(client)) {
+						// Opened the saved-counters screen.
 					} else {
-						// No party slot under the cursor: try a hovered trainer NPC instead.
-						com.cobblemonmousemenu.net.TrainerTeamClient.onClick();
+						int slot = CobblemonMouseMenuClient.getSlotAtMouse(client);
+						if (slot >= 0) {
+							CobblemonMouseMenuClient.openSummaryForSlot(slot);
+						} else {
+							// No party slot under the cursor: try a hovered trainer NPC instead.
+							com.cobblemonmousemenu.net.TrainerTeamClient.onClick();
+						}
 					}
 				} else if (button == GLFW.GLFW_MOUSE_BUTTON_RIGHT) {
 					int slot = CobblemonMouseMenuClient.getSlotAtMouse(client);
 					if (slot >= 0) {
 						CobblemonMouseMenuClient.openContextMenuForSlot(slot);
+					} else {
+						// No party slot under the cursor: try a hovered own-Pokemon entity instead.
+						com.cobblemonmousemenu.net.TrainerTeamClient.onRightClick();
 					}
 				}
 			}

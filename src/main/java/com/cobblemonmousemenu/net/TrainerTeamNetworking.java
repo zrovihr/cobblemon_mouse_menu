@@ -5,10 +5,13 @@ import com.cobblemon.mod.common.api.moves.Move;
 import com.cobblemon.mod.common.api.pokemon.stats.Stats;
 import com.cobblemon.mod.common.api.storage.party.NPCPartyStore;
 import com.cobblemon.mod.common.api.storage.party.PlayerPartyStore;
+import com.cobblemon.mod.common.api.storage.pc.PCBox;
+import com.cobblemon.mod.common.api.storage.pc.PCStore;
 import com.cobblemon.mod.common.entity.npc.NPCEntity;
 import com.cobblemon.mod.common.pokemon.PokemonStats;
 import com.cobblemon.mod.common.pokemon.Pokemon;
 import com.cobblemonmousemenu.CobblemonMouseMenu;
+import com.cobblemonmousemenu.matchup.MatchupCalculator;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.server.level.ServerLevel;
@@ -35,7 +38,9 @@ public final class TrainerTeamNetworking {
         // Declare the payload types on both directions. Advertised to peers on connect.
         PayloadTypeRegistry.playC2S().register(RequestTrainerTeamPayload.TYPE, RequestTrainerTeamPayload.STREAM_CODEC);
         PayloadTypeRegistry.playC2S().register(PartyItemSwapPayload.TYPE, PartyItemSwapPayload.STREAM_CODEC);
+        PayloadTypeRegistry.playC2S().register(RequestMatchupPayload.TYPE, RequestMatchupPayload.STREAM_CODEC);
         PayloadTypeRegistry.playS2C().register(TrainerTeamPayload.TYPE, TrainerTeamPayload.STREAM_CODEC);
+        PayloadTypeRegistry.playS2C().register(MatchupPayload.TYPE, MatchupPayload.STREAM_CODEC);
 
         // Server side: unified take/give held item on the player's OWN party Pokemon.
         ServerPlayNetworking.registerGlobalReceiver(PartyItemSwapPayload.TYPE, (payload, context) -> {
@@ -88,6 +93,46 @@ public final class TrainerTeamNetworking {
             ServerPlayNetworking.send(player, new TrainerTeamPayload(payload.entityId(), "", team));
             CobblemonMouseMenu.LOGGER.debug("[TrainerTeam] served {} mon(s) for NPC {} to {}",
                     team.size(), payload.entityId(), player.getGameProfile().getName());
+        });
+
+        // Server side: rank the player's OWN roster (party + PC) against the enemy team the client
+        // sent up. The PC only exists server-side, so this read must happen here; we reply with just
+        // the ranked top results rather than the player's whole box.
+        ServerPlayNetworking.registerGlobalReceiver(RequestMatchupPayload.TYPE, (payload, context) -> {
+            ServerPlayer player = context.player();
+
+            MatchupCalculator calc = new MatchupCalculator(payload.enemyTeam());
+            if (!calc.hasEnemies()) {
+                ServerPlayNetworking.send(player, new MatchupPayload(payload.entityId(), new ArrayList<>()));
+                return;
+            }
+
+            // Optional level cap (e.g. an RCT/Cobbleverse battle restriction): 0 = no cap.
+            int maxLevel = payload.maxLevel();
+
+            // Party first (these are usable right now), then every box in the PC.
+            PlayerPartyStore party = Cobblemon.INSTANCE.getStorage().getParty(player);
+            for (Pokemon pokemon : party) {
+                if (maxLevel > 0 && pokemon.getLevel() > maxLevel) {
+                    continue;
+                }
+                calc.consider(pokemon, "Party");
+            }
+            PCStore pc = Cobblemon.INSTANCE.getStorage().getPC(player);
+            for (PCBox box : pc.getBoxes()) {
+                String label = "Box " + (box.getBoxNumber() + 1);
+                for (Pokemon pokemon : box) {
+                    if (maxLevel > 0 && pokemon.getLevel() > maxLevel) {
+                        continue;
+                    }
+                    calc.consider(pokemon, label);
+                }
+            }
+
+            List<MatchupEntry> ranked = calc.rank(12);
+            ServerPlayNetworking.send(player, new MatchupPayload(payload.entityId(), ranked));
+            CobblemonMouseMenu.LOGGER.debug("[Matchup] ranked {} counter(s) vs {} enemy mon(s) for {}",
+                    ranked.size(), payload.enemyTeam().size(), player.getGameProfile().getName());
         });
     }
 

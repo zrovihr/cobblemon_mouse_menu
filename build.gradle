@@ -70,11 +70,17 @@ jar {
 	}
 }
 
-// Copy built jar to Prism Launcher mods folder after build
+// Copy built jar to Prism Launcher mods folder after build.
+// Clear any older build of this mod from the folder first: the version can change between builds,
+// and two jars sharing the same mod id make Fabric refuse to launch.
 tasks.register('copyToMods', Copy) {
 	dependsOn remapJar
+	def modsDir = "${System.getProperty('user.home')}/AppData/Roaming/PrismLauncher/instances/Cobbleverse/minecraft/mods"
+	doFirst {
+		delete fileTree(dir: modsDir, include: "${project.archives_base_name}*.jar")
+	}
 	from(remapJar.archiveFile)
-	into("${System.getProperty('user.home')}/AppData/Roaming/PrismLauncher/instances/Cobbleverse/minecraft/mods")
+	into(modsDir)
 }
 build.finalizedBy copyToMods
 

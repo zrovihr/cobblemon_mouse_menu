@@ -4,6 +4,7 @@ import com.cobblemon.mod.common.client.CobblemonClient;
 import com.cobblemon.mod.common.client.gui.PartyOverlay;
 import com.cobblemon.mod.common.client.gui.summary.Summary;
 import com.cobblemon.mod.common.net.messages.server.SendOutPokemonPacket;
+import com.cobblemon.mod.common.entity.pokemon.PokemonEntity;
 import com.cobblemonmousemenu.client.gui.TrainerTeamScreen;
 import com.cobblemon.mod.common.pokemon.Pokemon;
 import com.cobblemon.mod.common.pokemon.activestate.SentOutState;
@@ -18,6 +19,9 @@ import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.protocol.game.ServerboundInteractPacket;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.item.ItemStack;
 import org.lwjgl.glfw.GLFW;
 import org.slf4j.Logger;
@@ -46,10 +50,14 @@ public class CobblemonMouseMenuClient implements ClientModInitializer {
 	private static final int CTX_PAD = 4;
 	private static boolean contextMenuOpen = false;
 	private static int ctxSlot = -1;
+	private static int ctxEntityId = -1;
 	private static int ctxX, ctxY, ctxW, ctxH;
 	private static String ctxTitle = "";
 	private static final List<String> ctxRows = new ArrayList<>();
 	private static final List<Boolean> ctxRowEnabled = new ArrayList<>();
+
+	// "View saved counters" HUD button bounds (gui-scaled), recomputed each HUD frame; -1 = hidden.
+	private static int savedBtnX = -1, savedBtnY = -1, savedBtnW = 0, savedBtnH = 0;
 
 	public static boolean isMouseMenuActive() {
 		return mouseMenuActive;
@@ -62,6 +70,7 @@ public class CobblemonMouseMenuClient implements ClientModInitializer {
 	public static void closeContextMenu() {
 		contextMenuOpen = false;
 		ctxSlot = -1;
+		ctxEntityId = -1;
 		ctxRows.clear();
 		ctxRowEnabled.clear();
 	}
@@ -104,7 +113,7 @@ public class CobblemonMouseMenuClient implements ClientModInitializer {
 		return -1;
 	}
 
-	/** Right-click action: open the party-slot context menu (send out / item swap) at the cursor. */
+	/** Right-click action on a party slot: open the context menu anchored beside that slot. */
 	public static void openContextMenuForSlot(int slotIndex) {
 		Minecraft client = Minecraft.getInstance();
 		if (client.player == null) return;
@@ -113,18 +122,70 @@ public class CobblemonMouseMenuClient implements ClientModInitializer {
 		if (slotIndex < 0 || slotIndex >= party.size() || party.get(slotIndex) == null) return;
 		Pokemon pokemon = party.get(slotIndex);
 
-		ctxSlot = slotIndex;
+		// Anchor to the RIGHT of the party panel, aligned to the clicked slot. The party portraits
+		// are 3D models drawn on top of flat HUD quads, so a popup overlapping the panel would render
+		// behind them — placing it clear of the panel avoids the layering problem entirely.
+		int guiHeight = client.getWindow().getGuiScaledHeight();
+		int totalHeight = party.size() * SLOT_HEIGHT;
+		int startY = guiHeight / 2 - totalHeight / 2 - 10;
+		int slotY = startY + slotIndex * SLOT_STEP;
+
+		// If this Pokemon is currently sent out, its world entity backs the "Open Radial menu" row.
+		PokemonEntity out = pokemon.getEntity();
+		int entityId = out != null ? out.getId() : -1;
+		openContextMenu(pokemon, slotIndex, entityId, SLOT_X + SLOT_WIDTH + 8, slotY);
+	}
+
+	/**
+	 * Right-click action on the player's OWN sent-out Pokemon in the world: open the same context
+	 * menu as the party panel, anchored at the cursor. Returns false if it isn't actionable.
+	 */
+	public static boolean openContextMenuForEntity(PokemonEntity entity) {
+		Minecraft client = Minecraft.getInstance();
+		if (client.player == null || CobblemonClient.INSTANCE == null) return false;
+		Pokemon target = entity.getPokemon();
+		if (target == null) return false;
+
+		// Sent-out mons stay in the party, so match by uuid: that lets Send out / item act on the
+		// right slot. A pastured (not-in-party) Pokemon resolves to slot -1 and those rows disable.
+		List<Pokemon> party = CobblemonClient.INSTANCE.getStorage().getParty().getSlots();
+		int slot = -1;
+		for (int i = 0; i < party.size(); i++) {
+			Pokemon p = party.get(i);
+			if (p != null && p.getUuid().equals(target.getUuid())) {
+				slot = i;
+				break;
+			}
+		}
+
+		int guiWidth = client.getWindow().getGuiScaledWidth();
+		double guiScale = (double) client.getWindow().getWidth() / guiWidth;
+		int mx = (int) (client.mouseHandler.xpos() / guiScale);
+		int my = (int) (client.mouseHandler.ypos() / guiScale);
+		openContextMenu(target, slot, entity.getId(), mx, my);
+		return true;
+	}
+
+	/**
+	 * Build and show the context popup. {@code slot} is the owning party slot (or -1 if the Pokemon
+	 * isn't in the party); {@code entityId} is its sent-out world entity (or -1 if recalled). The
+	 * popup top-left is anchored at ({@code anchorX}, {@code anchorY}), clamped to the screen.
+	 */
+	private static void openContextMenu(Pokemon pokemon, int slot, int entityId, int anchorX, int anchorY) {
+		Minecraft client = Minecraft.getInstance();
+		ctxSlot = slot;
+		ctxEntityId = entityId;
 		ctxTitle = pokemon.getDisplayName(false).getString();
 		ctxRows.clear();
 		ctxRowEnabled.clear();
 
-		// Row 0: send out / recall (toggles server-side; labelled from the synced state).
+		// Row 0: send out / recall (party slot only; labelled from the synced state).
 		boolean isOut = pokemon.getState() instanceof SentOutState;
 		ctxRows.add(isOut ? "Recall" : "Send out");
-		ctxRowEnabled.add(true);
+		ctxRowEnabled.add(slot >= 0);
 
-		// Row 1: unified take/give held item (needs this mod on the server).
-		boolean canSwap = ClientPlayNetworking.canSend(PartyItemSwapPayload.TYPE);
+		// Row 1: unified take/give held item (party slot only; needs this mod on the server).
+		boolean canSwap = slot >= 0 && ClientPlayNetworking.canSend(PartyItemSwapPayload.TYPE);
 		ItemStack hand = client.player.getMainHandItem();
 		ItemStack held = pokemon.heldItem();
 		String itemLabel;
@@ -138,6 +199,11 @@ public class CobblemonMouseMenuClient implements ClientModInitializer {
 		ctxRows.add(itemLabel);
 		ctxRowEnabled.add(canSwap);
 
+		// Row 2: Cobblemon's native interaction wheel (give item / ride / shoulder / cosmetic).
+		// Only meaningful when the Pokemon is actually out in the world to interact with.
+		ctxRows.add("Open Radial menu");
+		ctxRowEnabled.add(entityId >= 0);
+
 		// Size the popup.
 		int guiWidth = client.getWindow().getGuiScaledWidth();
 		int guiHeight = client.getWindow().getGuiScaledHeight();
@@ -148,14 +214,8 @@ public class CobblemonMouseMenuClient implements ClientModInitializer {
 		ctxW = Math.max(96, w);
 		ctxH = 13 + ctxRows.size() * CTX_ROW_H + CTX_PAD;
 
-		// Anchor it to the RIGHT of the party panel, aligned to the clicked slot. The party portraits
-		// are 3D models drawn on top of flat HUD quads, so a popup overlapping the panel would render
-		// behind them — placing it clear of the panel avoids the layering problem entirely.
-		int totalHeight = party.size() * SLOT_HEIGHT;
-		int startY = guiHeight / 2 - totalHeight / 2 - 10;
-		int slotY = startY + slotIndex * SLOT_STEP;
-		ctxX = Math.max(2, Math.min(SLOT_X + SLOT_WIDTH + 8, guiWidth - ctxW - 2));
-		ctxY = Math.max(2, Math.min(slotY, guiHeight - ctxH - 2));
+		ctxX = Math.max(2, Math.min(anchorX, guiWidth - ctxW - 2));
+		ctxY = Math.max(2, Math.min(anchorY, guiHeight - ctxH - 2));
 
 		contextMenuOpen = true;
 	}
@@ -181,17 +241,37 @@ public class CobblemonMouseMenuClient implements ClientModInitializer {
 	}
 
 	private static void runContextAction(int idx) {
-		if (ctxSlot < 0) return;
 		switch (idx) {
-			case 0 -> new SendOutPokemonPacket(ctxSlot).sendToServer();
+			case 0 -> {
+				if (ctxSlot >= 0) new SendOutPokemonPacket(ctxSlot).sendToServer();
+			}
 			case 1 -> {
-				if (ClientPlayNetworking.canSend(PartyItemSwapPayload.TYPE)) {
+				if (ctxSlot >= 0 && ClientPlayNetworking.canSend(PartyItemSwapPayload.TYPE)) {
 					ClientPlayNetworking.send(new PartyItemSwapPayload(ctxSlot));
 				}
 			}
+			case 2 -> openRadialMenu();
 			default -> {
 			}
 		}
+	}
+
+	/**
+	 * Open Cobblemon's native interaction wheel for the context Pokemon by replaying a shift-right-
+	 * click on its world entity: the server decides the available options (give held item, ride,
+	 * mount-on-shoulder, cosmetic) and sends the wheel back as a screen. Leaving mouse-menu mode lets
+	 * that screen take the cursor. Like vanilla, the interaction needs the entity within reach.
+	 */
+	private static void openRadialMenu() {
+		if (ctxEntityId < 0) return;
+		Minecraft client = Minecraft.getInstance();
+		if (client.player == null || client.level == null || client.getConnection() == null) return;
+		Entity entity = client.level.getEntity(ctxEntityId);
+		if (!(entity instanceof PokemonEntity)) return;
+
+		closeMouseMenu();
+		client.getConnection().send(
+				ServerboundInteractPacket.createInteractionPacket(entity, true, InteractionHand.MAIN_HAND));
 	}
 
 	private static void renderContextMenu(GuiGraphics g, Minecraft client) {
@@ -218,6 +298,45 @@ public class CobblemonMouseMenuClient implements ClientModInitializer {
 			g.drawString(client.font, ctxRows.get(i), ctxX + CTX_PAD, y + 3, color, false);
 			y += CTX_ROW_H;
 		}
+	}
+
+	/** Draw the "View saved counters" HUD button (only when a result has been saved) and cache its bounds. */
+	private static void renderSavedCountersButton(GuiGraphics g, Minecraft client, int y) {
+		if (!TrainerTeamScreen.hasSavedCounters()) {
+			savedBtnX = -1;
+			return;
+		}
+		String label = "★ Saved counters: " + TrainerTeamScreen.savedTrainerName();
+		int w = client.font.width(label) + 8;
+		int x = SLOT_X + 2;
+
+		int guiWidth = client.getWindow().getGuiScaledWidth();
+		double guiScale = (double) client.getWindow().getWidth() / guiWidth;
+		int mx = (int) (client.mouseHandler.xpos() / guiScale);
+		int my = (int) (client.mouseHandler.ypos() / guiScale);
+		boolean hover = mx >= x - 2 && mx < x + w && my >= y - 2 && my < y + 11;
+
+		g.fill(x - 2, y - 2, x + w, y + 11, hover ? 0xFF2E8B57 : 0xCC1A2030);
+		g.drawString(client.font, Component.literal(label).withStyle(s -> s.withColor(0xFFE8F0E8)), x, y, 0xFFFFFFFF, true);
+
+		savedBtnX = x - 2;
+		savedBtnY = y - 2;
+		savedBtnW = w + 2;
+		savedBtnH = 13;
+	}
+
+	/** If the click is on the "View saved counters" button, open the saved view. Returns true if handled. */
+	public static boolean clickSavedCountersButton(Minecraft client) {
+		if (savedBtnX < 0) return false;
+		int guiWidth = client.getWindow().getGuiScaledWidth();
+		double guiScale = (double) client.getWindow().getWidth() / guiWidth;
+		int mx = (int) (client.mouseHandler.xpos() / guiScale);
+		int my = (int) (client.mouseHandler.ypos() / guiScale);
+		if (mx >= savedBtnX && mx < savedBtnX + savedBtnW && my >= savedBtnY && my < savedBtnY + savedBtnH) {
+			TrainerTeamScreen.openSaved();
+			return true;
+		}
+		return false;
 	}
 
 	public static void openSummaryForSlot(int slotIndex) {
@@ -331,6 +450,9 @@ public class CobblemonMouseMenuClient implements ClientModInitializer {
 				g.drawString(client.font, Component.literal("Right-click ").withStyle(s -> s.withColor(0xFFE0913A))
 						.append(Component.literal("Actions").withStyle(s -> s.withColor(0xFFD8DEE6))),
 						SLOT_X + 2, legendY + 11, 0xFFFFFFFF, true);
+
+				// "View saved counters" button: a clickable shortcut to the last saved Find-counters result.
+				renderSavedCountersButton(g, client, legendY + 24);
 
 				// The right-click context popup, drawn on top of everything else (HUD, not a Screen).
 				renderContextMenu(g, client);
